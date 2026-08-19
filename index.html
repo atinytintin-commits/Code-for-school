@@ -1,0 +1,758 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport"
+      content="width=device-width, initial-scale=1.0,
+               maximum-scale=1.0, user-scalable=no,
+               viewport-fit=cover">
+
+<title>East Asia — Touch Chinese Rain</title>
+
+<style>
+html, body {
+    margin: 0;
+    padding: 0;
+    width: 100%;
+    height: 100%;
+    overflow: hidden;
+    background: #000;
+    touch-action: none;
+    overscroll-behavior: none;
+    -webkit-user-select: none;
+    user-select: none;
+}
+
+body {
+    position: fixed;
+    inset: 0;
+}
+
+canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+    touch-action: none;
+}
+
+#hint {
+    position: fixed;
+    left: 50%;
+    top: 50%;
+    transform: translate(-50%, -50%);
+    color: rgba(255,255,255,.3);
+    font-family: "Noto Serif SC","Songti SC","STSong",serif;
+    font-size: 13px;
+    letter-spacing: 4px;
+    white-space: nowrap;
+    pointer-events: none;
+    transition: opacity 1.2s ease;
+}
+</style>
+</head>
+
+<body>
+
+<canvas id="canvas"></canvas>
+<div id="hint">TOUCH AND HOLD</div>
+
+<script>
+"use strict";
+
+/* =========================================================
+   CANVAS
+========================================================= */
+
+const canvas = document.getElementById("canvas");
+const ctx = canvas.getContext("2d", { alpha: false });
+
+let width = 0;
+let height = 0;
+let dpr = 1;
+
+function resize() {
+    dpr = Math.min(window.devicePixelRatio || 1, 2);
+
+    width = window.innerWidth;
+    height = window.innerHeight;
+
+    canvas.width = Math.round(width * dpr);
+    canvas.height = Math.round(height * dpr);
+
+    canvas.style.width = width + "px";
+    canvas.style.height = height + "px";
+
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+}
+
+window.addEventListener("resize", resize);
+window.addEventListener("orientationchange", resize);
+resize();
+
+
+/* =========================================================
+   POEM
+========================================================= */
+
+const poem = [
+    "江城如画里",
+    "山晚望晴空",
+    "两水夹明镜",
+    "双桥落彩虹",
+    "人烟寒橘柚",
+    "秋色老梧桐",
+    "谁念北楼上",
+    "临风怀谢公"
+];
+
+const characters = poem.join("").split("");
+let characterIndex = 0;
+
+
+/* =========================================================
+   COLOURS FROM THE PAINTING
+   ========================================================= */
+
+const palette = [
+    "#F1E7CB", // warm ivory
+    "#D8D6C0", // pale paper
+    "#B9C4B5", // pale grey-green
+    "#9DB9A8", // sage
+    "#76B9A5", // turquoise
+    "#48B5A5", // bright turquoise
+    "#3E9B91", // jade teal
+    "#267E7B", // deep turquoise
+    "#628B83", // muted forest teal
+    "#426B67", // dark blue-green
+    "#315653", // ink teal
+    "#A78B68", // warm earth
+    "#C49A62", // ochre
+    "#D47B43", // warm orange
+    "#C95235"  // vermilion
+];
+
+
+/* =========================================================
+   SETTINGS
+========================================================= */
+
+const settings = {
+    columnSpacing: 30,
+    characterSize: 22,
+    maxColumns: 65,
+    maxParticles: 1600,
+
+    columnSpawnInterval: 70,
+    characterSpawnInterval: 90,
+
+    /*
+     * More responsive on a phone:
+     * touching creates a wider group immediately.
+     */
+    touchColumns: 9,
+
+    /*
+     * Slightly brighter than the original.
+     */
+    glowStrength: 18
+};
+
+
+/* =========================================================
+   STATE
+========================================================= */
+
+let lastColumnSpawn = 0;
+let mouseDown = false;
+
+const columns = [];
+const particles = [];
+
+
+/* =========================================================
+   POINTER / TOUCH STATE
+   Pointer Events work for mouse, finger and many
+   interactive displays with one system.
+========================================================= */
+
+const pointers = new Map();
+
+function getPointerPosition(event) {
+    const rect = canvas.getBoundingClientRect();
+
+    return {
+        x: event.clientX - rect.left,
+        y: event.clientY - rect.top
+    };
+}
+
+function startPointer(event) {
+    event.preventDefault();
+
+    const p = getPointerPosition(event);
+
+    pointers.set(event.pointerId, p);
+
+    mouseDown = true;
+
+    document.getElementById("hint").style.opacity = "0";
+
+    /*
+     * Capture the pointer so dragging outside the canvas
+     * doesn't accidentally interrupt the rain.
+     */
+    try {
+        canvas.setPointerCapture(event.pointerId);
+    } catch (_) {}
+
+    createTouchBurst(p.x);
+}
+
+function movePointer(event) {
+    if (!pointers.has(event.pointerId)) return;
+
+    event.preventDefault();
+
+    const p = getPointerPosition(event);
+
+    pointers.set(event.pointerId, p);
+}
+
+function endPointer(event) {
+    event.preventDefault();
+
+    pointers.delete(event.pointerId);
+
+    if (pointers.size === 0) {
+        mouseDown = false;
+    }
+}
+
+canvas.addEventListener("pointerdown", startPointer, {
+    passive: false
+});
+
+canvas.addEventListener("pointermove", movePointer, {
+    passive: false
+});
+
+canvas.addEventListener("pointerup", endPointer, {
+    passive: false
+});
+
+canvas.addEventListener("pointercancel", endPointer, {
+    passive: false
+});
+
+canvas.addEventListener("pointerleave", () => {
+    /*
+     * Do nothing.
+     *
+     * Pointer capture keeps the interaction alive.
+     */
+});
+
+
+/* =========================================================
+   GET ACTIVE TOUCH POSITION
+========================================================= */
+
+function getActiveTouchPosition() {
+    const first = pointers.values().next();
+
+    if (first.done) return null;
+
+    return first.value;
+}
+
+
+/* =========================================================
+   COLUMN
+========================================================= */
+
+class Column {
+
+    constructor(x) {
+        this.x = x;
+        this.y = -40;
+
+        this.speed =
+            0.75 + Math.random() * 1.25;
+
+        this.lastCharacter = 0;
+        this.dead = false;
+
+        /*
+         * Each column has a colour family.
+         */
+        this.paletteIndex =
+            Math.floor(Math.random() * palette.length);
+    }
+
+    update(time) {
+
+        if (!mouseDown) return;
+
+        this.y += this.speed;
+
+        if (
+            time - this.lastCharacter >
+            settings.characterSpawnInterval / this.speed
+        ) {
+            this.spawnCharacter();
+            this.lastCharacter = time;
+        }
+
+        if (this.y > height + 100) {
+            this.dead = true;
+        }
+    }
+
+    spawnCharacter() {
+
+        if (particles.length >= settings.maxParticles) {
+            return;
+        }
+
+        const char =
+            characters[
+                characterIndex % characters.length
+            ];
+
+        characterIndex++;
+
+        particles.push(
+            new ChineseParticle(
+                this.x,
+                this.y,
+                char,
+                this
+            )
+        );
+    }
+}
+
+
+/* =========================================================
+   PARTICLE
+========================================================= */
+
+class ChineseParticle {
+
+    constructor(x, y, char, column) {
+
+        this.x = x;
+        this.y = y;
+
+        this.char = char;
+        this.column = column;
+
+        this.size =
+            settings.characterSize +
+            (Math.random() - .5) * 3;
+
+        this.vy =
+            .6 + Math.random() * 1.0;
+
+        this.gravity =
+            .018 + Math.random() * .025;
+
+        this.resting = false;
+        this.fading = false;
+
+        this.life = 1;
+        this.alpha = 0;
+
+        this.fadeSpeed =
+            .006 + Math.random() * .009;
+
+        /*
+         * Choose a colour near this column's
+         * colour family.
+         */
+        const variation =
+            Math.floor(
+                (Math.random() - .5) * 5
+            );
+
+        this.color =
+            palette[
+                (
+                    column.paletteIndex +
+                    variation +
+                    palette.length
+                ) % palette.length
+            ];
+
+        /*
+         * A small chance of an especially vivid
+         * colour from the painting.
+         */
+        if (Math.random() < .25) {
+            const vivid = [
+                "#48B5A5",
+                "#3E9B91",
+                "#267E7B",
+                "#C49A62",
+                "#D47B43",
+                "#C95235",
+                "#F1E7CB"
+            ];
+
+            this.color =
+                vivid[
+                    Math.floor(
+                        Math.random() * vivid.length
+                    )
+                ];
+        }
+
+        this.pulseOffset =
+            Math.random() * Math.PI * 2;
+
+        this.pulseSpeed =
+            .8 + Math.random() * 1.5;
+
+        this.scaleX =
+            .9 + Math.random() * .12;
+
+        this.scaleY =
+            1.0 + Math.random() * .08;
+    }
+
+    update() {
+
+        if (!this.resting) {
+
+            this.vy += this.gravity;
+            this.y += this.vy;
+
+            this.x = this.column.x;
+
+            const bottom =
+                height - this.size / 2;
+
+            if (this.y >= bottom) {
+
+                this.y = bottom;
+                this.vy = 0;
+
+                this.resting = true;
+                this.fading = true;
+            }
+
+            if (!this.resting) {
+
+                for (const other of particles) {
+
+                    if (other === this) continue;
+                    if (!other.resting) continue;
+
+                    if (
+                        Math.abs(
+                            other.x - this.x
+                        ) > 3
+                    ) {
+                        continue;
+                    }
+
+                    const distance =
+                        Math.abs(
+                            this.y - other.y
+                        );
+
+                    const required =
+                        this.size * .95;
+
+                    if (
+                        distance < required &&
+                        this.y < other.y
+                    ) {
+
+                        this.y =
+                            other.y - required;
+
+                        this.vy = 0;
+                        this.resting = true;
+                        this.fading = true;
+
+                        break;
+                    }
+                }
+            }
+        }
+
+        if (this.fading) {
+
+            this.life -= this.fadeSpeed;
+
+            this.alpha =
+                Math.max(0, this.life);
+
+        } else {
+
+            this.alpha =
+                Math.min(
+                    1,
+                    this.alpha + .05
+                );
+        }
+    }
+
+    draw(time) {
+
+        if (this.life <= 0) return;
+
+        const pulse =
+            Math.sin(
+                time *
+                .001 *
+                this.pulseSpeed +
+                this.pulseOffset
+            ) * .5 + .5;
+
+        ctx.save();
+
+        ctx.translate(
+            this.x,
+            this.y
+        );
+
+        ctx.scale(
+            this.scaleX,
+            this.scaleY
+        );
+
+        ctx.globalAlpha =
+            this.alpha *
+            (.78 + pulse * .22);
+
+        ctx.font =
+            `${this.size}px
+             "Noto Serif SC",
+             "Songti SC",
+             "STSong",
+             serif`;
+
+        ctx.textAlign = "center";
+        ctx.textBaseline = "middle";
+
+        /*
+         * Bright, soft illumination.
+         */
+        ctx.shadowColor = this.color;
+
+        ctx.shadowBlur =
+            5 + pulse * settings.glowStrength;
+
+        ctx.fillStyle = this.color;
+
+        ctx.fillText(
+            this.char,
+            0,
+            0
+        );
+
+        ctx.restore();
+    }
+}
+
+
+/* =========================================================
+   CREATE COLUMN
+========================================================= */
+
+function createColumn(x) {
+
+    if (
+        columns.length >=
+        settings.maxColumns
+    ) {
+        return;
+    }
+
+    x =
+        Math.round(
+            x / settings.columnSpacing
+        ) * settings.columnSpacing;
+
+    const exists =
+        columns.some(
+            column =>
+                Math.abs(
+                    column.x - x
+                ) < 3
+        );
+
+    if (exists) return;
+
+    columns.push(
+        new Column(x)
+    );
+}
+
+
+/* =========================================================
+   CREATE INITIAL TOUCH GROUP
+========================================================= */
+
+function createTouchBurst(x) {
+
+    const count =
+        settings.touchColumns;
+
+    const center =
+        Math.floor(count / 2);
+
+    for (
+        let i = 0;
+        i < count;
+        i++
+    ) {
+
+        /*
+         * Small random variation makes the touch
+         * feel organic rather than mechanical.
+         */
+        const offset =
+            (i - center) *
+            settings.columnSpacing +
+            (Math.random() - .5) * 8;
+
+        createColumn(
+            x + offset
+        );
+    }
+}
+
+
+/* =========================================================
+   CONTINUOUS SPAWNING AROUND ACTIVE TOUCH
+========================================================= */
+
+function spawnColumns(time) {
+
+    if (!mouseDown) return;
+
+    if (
+        time - lastColumnSpawn <
+        settings.columnSpawnInterval
+    ) {
+        return;
+    }
+
+    /*
+     * Use the most recent finger position.
+     */
+    const touch =
+        getActiveTouchPosition();
+
+    if (!touch) return;
+
+    /*
+     * A few columns around the finger.
+     */
+    const number =
+        1 + Math.floor(Math.random() * 3);
+
+    for (
+        let i = 0;
+        i < number;
+        i++
+    ) {
+
+        const offset =
+            (Math.random() - .5) * 180;
+
+        createColumn(
+            touch.x + offset
+        );
+    }
+
+    lastColumnSpawn = time;
+}
+
+
+/* =========================================================
+   UPDATE
+========================================================= */
+
+function update(time) {
+
+    spawnColumns(time);
+
+    for (const column of columns) {
+        column.update(time);
+    }
+
+    for (const particle of particles) {
+        particle.update();
+    }
+
+    for (
+        let i = columns.length - 1;
+        i >= 0;
+        i--
+    ) {
+
+        if (columns[i].dead) {
+            columns.splice(i, 1);
+        }
+    }
+
+    for (
+        let i = particles.length - 1;
+        i >= 0;
+        i--
+    ) {
+
+        if (particles[i].life <= 0) {
+            particles.splice(i, 1);
+        }
+    }
+}
+
+
+/* =========================================================
+   DRAW
+========================================================= */
+
+function draw(time) {
+
+    ctx.globalCompositeOperation =
+        "source-over";
+
+    ctx.fillStyle =
+        "#000000";
+
+    ctx.fillRect(
+        0,
+        0,
+        width,
+        height
+    );
+
+    for (const particle of particles) {
+        particle.draw(time);
+    }
+}
+
+
+/* =========================================================
+   ANIMATION
+========================================================= */
+
+function animate(time) {
+
+    update(time);
+    draw(time);
+
+    requestAnimationFrame(animate);
+}
+
+requestAnimationFrame(animate);
+
+</script>
+
+</body>
+</html>
